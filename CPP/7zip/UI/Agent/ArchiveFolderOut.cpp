@@ -43,7 +43,7 @@ static bool Delete_EmptyFolder_And_EmptySubFolders(const FString &path)
           return false;
         if (!found)
           break;
-        if (fileInfo.IsDir())
+        if (enumerator.DirEntry_IsDir(fileInfo, false))
           names.Add(fileInfo.Name);
       }
     }
@@ -57,7 +57,7 @@ static bool Delete_EmptyFolder_And_EmptySubFolders(const FString &path)
       return false;
   }
   // we clear read-only attrib to remove read-only dir
-  if (!SetFileAttrib(path, 0))
+  if (!SetFileAttrib_PosixHighDetect(path, 0))
     return false;
   return RemoveDir(path);
 }

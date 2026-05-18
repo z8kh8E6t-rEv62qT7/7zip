@@ -5,7 +5,9 @@
 #include "StringConvert.h"
 
 #ifndef _WIN32
-// #include <stdio.h>
+#include <errno.h>
+#include <iconv.h>
+#include <stdio.h>
 #include <stdlib.h>
 #endif
 
@@ -259,11 +261,198 @@ static void MultiByteToUnicodeString2_Native(UString &dest, const AString &src)
 
 bool g_ForceToUTF8 = true; // false;
 
+static bool ConvertWithIconvRaw(AString &dest,
+    const AString &src,
+    const char *fromCodePageName,
+    const char *toCodePageName)
+{
+  dest.Empty();
+  if (!fromCodePageName || !toCodePageName)
+    return false;
+
+  iconv_t cd = iconv_open(toCodePageName, fromCodePageName);
+  if (cd == (iconv_t)-1)
+    return false;
+
+  bool ok = false;
+  const size_t outSize = ((size_t)src.Len() + 1) * 8;
+  char *outBuf = dest.GetBuf((unsigned)outSize);
+  char *outPtr = outBuf;
+  size_t outLeft = outSize;
+  char *inPtr = (char *)(void *)(const char *)src;
+  size_t inLeft = src.Len();
+
+  for (;;)
+  {
+    const size_t result = iconv(cd, &inPtr, &inLeft, &outPtr, &outLeft);
+    if (result != (size_t)-1)
+    {
+      if (inLeft == 0)
+      {
+        *outPtr = 0;
+        dest.ReleaseBuf_SetEnd((unsigned)(outPtr - outBuf));
+        ok = true;
+      }
+      break;
+    }
+
+    if (errno != E2BIG || outLeft == 0)
+      break;
+  }
+
+  if (!ok)
+    dest.ReleaseBuf_SetEnd(0);
+
+  iconv_close(cd);
+  return ok;
+}
+
+static bool TryConvertWithIconv(UString &dest, const AString &src, const char *codePageName)
+{
+  AString utf8;
+  if (!ConvertWithIconvRaw(utf8, src, codePageName, "UTF-8"))
+    return false;
+  return ConvertUTF8ToUnicode(utf8, dest);
+}
+
+static bool TryConvertWithAliases(UString &dest, const AString &src,
+    const char * const *aliases, unsigned numAliases)
+{
+  for (unsigned i = 0; i < numAliases; i++)
+    if (TryConvertWithIconv(dest, src, aliases[i]))
+      return true;
+  return false;
+}
+
+static bool TryConvertWithCodePageName(UString &dest, const AString &src, UINT codePage)
+{
+  char temp[32];
+
+  if (codePage >= 1250 && codePage <= 1258)
+  {
+    snprintf(temp, sizeof(temp), "WINDOWS-%u", (unsigned)codePage);
+    if (TryConvertWithIconv(dest, src, temp))
+      return true;
+  }
+
+  snprintf(temp, sizeof(temp), "CP%u", (unsigned)codePage);
+  if (TryConvertWithIconv(dest, src, temp))
+    return true;
+
+  snprintf(temp, sizeof(temp), "MS%u", (unsigned)codePage);
+  return TryConvertWithIconv(dest, src, temp);
+}
+
+static bool TryMultiByteToUnicodeStringWithCodePage(UString &dest, const AString &src, UINT codePage)
+{
+  if (codePage == CP_UTF8 || codePage == CP_ACP || codePage == CP_OEMCP)
+    return false;
+
+  switch (codePage)
+  {
+    case 932:
+    {
+      static const char * const kAliases[] = { "SHIFT_JIS", "CP932" };
+      return TryConvertWithAliases(dest, src, kAliases, 2);
+    }
+    case 936:
+    {
+      static const char * const kAliases[] = { "GB18030", "GBK", "CP936" };
+      return TryConvertWithAliases(dest, src, kAliases, 3);
+    }
+    case 949:
+    {
+      static const char * const kAliases[] = { "EUC-KR", "CP949" };
+      return TryConvertWithAliases(dest, src, kAliases, 2);
+    }
+    case 950:
+    {
+      static const char * const kAliases[] = { "BIG5", "CP950" };
+      return TryConvertWithAliases(dest, src, kAliases, 2);
+    }
+    case 51949:
+    {
+      static const char * const kAliases[] = { "EUC-KR" };
+      return TryConvertWithAliases(dest, src, kAliases, 1);
+    }
+    case 54936:
+    {
+      static const char * const kAliases[] = { "GB18030", "GBK" };
+      return TryConvertWithAliases(dest, src, kAliases, 2);
+    }
+    default:
+      return TryConvertWithCodePageName(dest, src, codePage);
+  }
+}
+
+#ifdef __APPLE__
+static bool ContainsUnicodeReplacementCharacter(const UString &s)
+{
+  for (unsigned i = 0; i < s.Len(); ++i)
+    if ((unsigned)s[i] == 0xFFFD)
+      return true;
+  return false;
+}
+
+static bool TryConvertWithRoundTrip(UString &dest, const AString &src, const char *encodingName)
+{
+  AString utf8;
+  if (!ConvertWithIconvRaw(utf8, src, encodingName, "UTF-8"))
+    return false;
+
+  AString roundTrip;
+  if (!ConvertWithIconvRaw(roundTrip, utf8, "UTF-8", encodingName))
+    return false;
+
+  if (roundTrip.Len() != src.Len() || memcmp((const char *)roundTrip, (const char *)src, src.Len()) != 0)
+    return false;
+
+  if (!ConvertUTF8ToUnicode(utf8, dest))
+    return false;
+
+  return !ContainsUnicodeReplacementCharacter(dest);
+}
+
+static bool TryAutoDetectLegacyEncoding(UString &dest, const AString &src)
+{
+  if (src.IsEmpty() || CheckUTF8_AString(src))
+    return false;
+
+  static const char * const kCandidates[] =
+  {
+    "GB18030",
+    "GBK",
+    "CP936",
+    "BIG5",
+    "CP950",
+    "SHIFT_JIS",
+    "CP932",
+    "EUC-KR",
+    "CP949",
+    "WINDOWS-1251",
+    "WINDOWS-1252"
+  };
+
+  for (unsigned i = 0; i < sizeof(kCandidates) / sizeof(kCandidates[0]); ++i)
+    if (TryConvertWithRoundTrip(dest, src, kCandidates[i]))
+      return true;
+  return false;
+}
+#endif
+
 void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
 {
   dest.Empty();
   if (src.IsEmpty())
     return;
+
+  if (TryMultiByteToUnicodeStringWithCodePage(dest, src, codePage))
+    return;
+
+#ifdef __APPLE__
+  if (TryAutoDetectLegacyEncoding(dest, src))
+    return;
+#endif
 
   if (codePage == CP_UTF8 || g_ForceToUTF8)
   {

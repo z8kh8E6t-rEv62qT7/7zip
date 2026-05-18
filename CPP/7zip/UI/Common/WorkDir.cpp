@@ -2,14 +2,69 @@
 
 #include "StdAfx.h"
 
+#include "../../../Common/UTFConvert.h"
 #include "../../../Windows/FileName.h"
 #include "../../../Windows/FileSystem.h"
+
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 #include "WorkDir.h"
 
 using namespace NWindows;
 using namespace NFile;
 using namespace NDir;
+
+#ifdef __APPLE__
+static bool IsAppleVolumeRemovableOrEjectable(const FString &path)
+{
+  const UString uPath = fs2us(path);
+  if (uPath.IsEmpty())
+    return false;
+
+  AString utf8Path;
+  ConvertUnicodeToUTF8(uPath, utf8Path);
+  if (utf8Path.IsEmpty())
+    return false;
+
+  const UInt8 *bytes = (const UInt8 *)(const char *)utf8Path;
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+      bytes, utf8Path.Len(), false);
+  if (!url)
+    return false;
+
+  bool removableOrEjectable = false;
+
+  CFBooleanRef isRemovable = NULL;
+  if (CFURLCopyResourcePropertyForKey(url,
+      kCFURLVolumeIsRemovableKey,
+      (void **)&isRemovable,
+      NULL))
+  {
+    removableOrEjectable = (isRemovable == kCFBooleanTrue);
+    if (isRemovable)
+      CFRelease(isRemovable);
+  }
+
+  if (!removableOrEjectable)
+  {
+    CFBooleanRef isEjectable = NULL;
+    if (CFURLCopyResourcePropertyForKey(url,
+        kCFURLVolumeIsEjectableKey,
+        (void **)&isEjectable,
+        NULL))
+    {
+      removableOrEjectable = (isEjectable == kCFBooleanTrue);
+      if (isEjectable)
+        CFRelease(isEjectable);
+    }
+  }
+
+  CFRelease(url);
+  return removableOrEjectable;
+}
+#endif
 
 FString GetWorkDir(const NWorkDir::CInfo &workDirInfo, const FString &path, FString &fileName)
 {
@@ -34,6 +89,9 @@ FString GetWorkDir(const NWorkDir::CInfo &workDirInfo, const FString &path, FStr
       mode = NZipSettings::NWorkDir::NMode::kCurrent;
     */
   }
+  #elif defined(__APPLE__)
+  if (workDirInfo.ForRemovableOnly && !IsAppleVolumeRemovableOrEjectable(path))
+    mode = NWorkDir::NMode::kCurrent;
   #endif
   
   const int pos = path.ReverseFind_PathSepar() + 1;

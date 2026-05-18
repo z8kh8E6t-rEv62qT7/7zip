@@ -116,7 +116,7 @@ struct CUpdateOptions
   UString StdInFileName;
   UString EMailAddress;
   FString WorkingDir;
-  // UString AddPathPrefix;
+  UString AddPathPrefix;
 
   CObjectVector<CRenamePair> RenamePairs;
   CRecordVector<UInt64> VolumesSizes;

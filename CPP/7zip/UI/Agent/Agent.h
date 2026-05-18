@@ -6,6 +6,7 @@
 #include "../../../Common/MyCom.h"
 
 #include "../../../Windows/PropVariant.h"
+#include "../../../Windows/DLL.h"
 
 #include "../Common/LoadCodecs.h"
 #include "../Common/OpenArchive.h"
@@ -250,7 +251,7 @@ public:
 
   bool Is_Attrib_ReadOnly() const
   {
-    return _attrib != INVALID_FILE_ATTRIBUTES && (_attrib & FILE_ATTRIBUTE_READONLY);
+    return _attrib != (DWORD)-1 && (_attrib & FILE_ATTRIBUTE_READONLY);
   }
 
   bool IsThere_ReadOnlyArc() const

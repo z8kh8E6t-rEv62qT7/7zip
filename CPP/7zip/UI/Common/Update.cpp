@@ -1396,7 +1396,7 @@ HRESULT UpdateArchive(
 
       const HRESULT res = EnumerateItems(censor,
           options.PathMode,
-          UString(), // options.AddPathPrefix,
+          options.AddPathPrefix,
           dirItems);
 
       if (res != S_OK)

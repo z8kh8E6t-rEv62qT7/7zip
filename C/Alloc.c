@@ -5,6 +5,13 @@
 
 #ifdef _WIN32
 #include "7zWindows.h"
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/vm_region.h>
+#include <mach/vm_statistics.h>
+#include <pthread.h>
+#include <stdint.h>
 #endif
 #include <stdlib.h>
 
@@ -527,13 +534,161 @@ extern
 UInt32 g_LargePageFlags;
 UInt32 g_LargePageFlags = 0;
 
+#ifdef __APPLE__
+typedef struct
+{
+  void *address;
+  mach_vm_size_t size;
+} Z7MacSuperpageAllocation;
+
+static pthread_mutex_t g_MacSuperpageLock = PTHREAD_MUTEX_INITIALIZER;
+static Z7MacSuperpageAllocation *g_MacSuperpageAllocations = NULL;
+static size_t g_MacSuperpageCount = 0;
+static size_t g_MacSuperpageCapacity = 0;
+
+static mach_vm_size_t Z7MacSuperpageRegionSize(mach_vm_address_t address,
+    mach_vm_size_t fallback_size)
+{
+  mach_vm_address_t region_address = address;
+  mach_vm_size_t region_size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name = MACH_PORT_NULL;
+  const kern_return_t kr = mach_vm_region(mach_task_self(),
+      &region_address,
+      &region_size,
+      VM_REGION_BASIC_INFO_64,
+      (vm_region_info_t)&info,
+      &info_count,
+      &object_name);
+  if (object_name != MACH_PORT_NULL)
+    mach_port_deallocate(mach_task_self(), object_name);
+  if (kr == KERN_SUCCESS && region_address == address &&
+      region_size >= fallback_size)
+    return region_size;
+  return fallback_size;
+}
+
+static int Z7MacSuperpageTrack(void *address, mach_vm_size_t size)
+{
+  pthread_mutex_lock(&g_MacSuperpageLock);
+  if (g_MacSuperpageCount == g_MacSuperpageCapacity)
+  {
+    const size_t new_capacity = g_MacSuperpageCapacity == 0
+        ? 16
+        : g_MacSuperpageCapacity * 2;
+    Z7MacSuperpageAllocation *new_allocations;
+    if (new_capacity <= g_MacSuperpageCapacity ||
+        new_capacity > (size_t)(-1) / sizeof(Z7MacSuperpageAllocation))
+    {
+      pthread_mutex_unlock(&g_MacSuperpageLock);
+      return 0;
+    }
+    new_allocations = (Z7MacSuperpageAllocation *)realloc(
+        g_MacSuperpageAllocations,
+        new_capacity * sizeof(Z7MacSuperpageAllocation));
+    if (!new_allocations)
+    {
+      pthread_mutex_unlock(&g_MacSuperpageLock);
+      return 0;
+    }
+    g_MacSuperpageAllocations = new_allocations;
+    g_MacSuperpageCapacity = new_capacity;
+  }
+  g_MacSuperpageAllocations[g_MacSuperpageCount].address = address;
+  g_MacSuperpageAllocations[g_MacSuperpageCount].size = size;
+  g_MacSuperpageCount++;
+  pthread_mutex_unlock(&g_MacSuperpageLock);
+  return 1;
+}
+
+static int Z7MacSuperpageTake(void *address, mach_vm_size_t *size)
+{
+  size_t i;
+  pthread_mutex_lock(&g_MacSuperpageLock);
+  for (i = 0; i < g_MacSuperpageCount; i++)
+  {
+    if (g_MacSuperpageAllocations[i].address == address)
+    {
+      if (size)
+        *size = g_MacSuperpageAllocations[i].size;
+      g_MacSuperpageCount--;
+      g_MacSuperpageAllocations[i] =
+          g_MacSuperpageAllocations[g_MacSuperpageCount];
+      pthread_mutex_unlock(&g_MacSuperpageLock);
+      return 1;
+    }
+  }
+  pthread_mutex_unlock(&g_MacSuperpageLock);
+  return 0;
+}
+
+static void *Z7MacAllocSuperpage(size_t size, size_t page_size)
+{
+#ifdef VM_FLAGS_SUPERPAGE_SIZE_ANY
+  mach_vm_address_t address = 0;
+  mach_vm_size_t alloc_size;
+  mach_vm_size_t actual_size;
+  const size_t mask = page_size - 1;
+  const size_t rounded_size = (size + mask) & ~mask;
+  kern_return_t kr;
+
+  if (page_size == 0 || (page_size & mask) != 0)
+    return NULL;
+  if (rounded_size < size)
+    return NULL;
+
+  alloc_size = (mach_vm_size_t)rounded_size;
+  kr = mach_vm_allocate(mach_task_self(),
+      &address,
+      alloc_size,
+      VM_FLAGS_ANYWHERE | VM_FLAGS_SUPERPAGE_SIZE_ANY);
+  if (kr != KERN_SUCCESS || address == 0)
+    return NULL;
+
+  actual_size = Z7MacSuperpageRegionSize(address, alloc_size);
+  if (!Z7MacSuperpageTrack((void *)(uintptr_t)address, actual_size))
+  {
+    mach_vm_deallocate(mach_task_self(), address, actual_size);
+    return NULL;
+  }
+  return (void *)(uintptr_t)address;
+#else
+  UNUSED_VAR(size)
+  UNUSED_VAR(page_size)
+  return NULL;
+#endif
+}
+
+static int Z7MacFreeSuperpage(void *address)
+{
+  mach_vm_size_t alloc_size = 0;
+  if (!Z7MacSuperpageTake(address, &alloc_size))
+    return 0;
+  mach_vm_deallocate(mach_task_self(),
+      (mach_vm_address_t)(uintptr_t)address,
+      alloc_size);
+  return 1;
+}
+#endif
+
 void *BigAlloc(size_t size)
 {
   if (size == 0)
     return NULL;
+  const size_t pageSize = g_LargePageSize;
+#ifdef __APPLE__
+  if (pageSize && size > g_LargePageThresholdMin)
+  {
+    void *superpage = Z7MacAllocSuperpage(size, pageSize);
+    if (superpage)
+      return superpage;
+    if (g_LargePageFlags & Z7_LARGE_PAGES_FLAG_FAIL_STOP)
+      return NULL;
+  }
+#endif
 #ifdef USE_posix_memalign
   {
-    const size_t pageSize = g_LargePageSize;
     void *buf = NULL; // on Linux (and other systems), posix_memalign() does not modify memptr on failure (POSIX.1-2008 TC2).
     PRF(printf("\nBigAlloc 0x%08x=%5uMB", (unsigned)(size), (unsigned)(size >> 20));)
     if (pageSize && size > g_LargePageThresholdMin)
@@ -593,6 +748,10 @@ void *BigAlloc(size_t size)
 
 void BigFree(void *address)
 {
+#ifdef __APPLE__
+  if (Z7MacFreeSuperpage(address))
+    return;
+#endif
   z7_AlignedFree(address);
 }
 #endif // Z7_LARGE_PAGES

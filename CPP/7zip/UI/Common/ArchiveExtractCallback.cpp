@@ -28,6 +28,10 @@
 #include "../../../Windows/SecurityUtils.h"
 #endif
 
+#ifdef __APPLE__
+#include <sys/xattr.h>
+#endif
+
 #include "../../Common/FilePathAutoRename.h"
 #include "../../Common/StreamUtils.h"
 
@@ -49,6 +53,25 @@ static const char * const kCantDeleteOutputDir = "Cannot delete output folder";
 static const char * const kCantOpenOutFile = "Cannot open output file";
 #ifndef Z7_SFX
 static const char * const kCantOpenInFile = "Cannot open input file";
+#ifdef __APPLE__
+static const char * const kMacQuarantineAttributeName = "com.apple.quarantine";
+
+static bool WriteQuarantineAttribute_To_BaseFile(CFSTR fileName, const CByteBuffer &buf)
+{
+  if (buf.Size() == 0)
+    return true;
+  return setxattr(fileName, kMacQuarantineAttributeName, buf, buf.Size(), 0, XATTR_NOFOLLOW) == 0;
+}
+
+static void TryWriteQuarantineAttribute_To_BaseFile(CFSTR fileName, const CByteBuffer &buf)
+{
+  if (!WriteQuarantineAttribute_To_BaseFile(fileName, buf))
+  {
+    // Some destinations/filesystems don't support xattrs.
+  }
+}
+#endif
+
 #endif
 static const char * const kCantSetFileLen = "Cannot set length for output file";
 #ifdef SUPPORT_LINKS
@@ -311,7 +334,7 @@ CArchiveExtractCallback::CArchiveExtractCallback():
 
 void CArchiveExtractCallback::InitBeforeNewArchive()
 {
-#if defined(_WIN32) && !defined(UNDER_CE) && !defined(Z7_SFX)
+#if (defined(_WIN32) || defined(__APPLE__)) && !defined(UNDER_CE) && !defined(Z7_SFX)
   ZoneBuf.Free();
 #endif
 }
@@ -516,8 +539,13 @@ void CArchiveExtractCallback::CreateComplexDirectory(
     #endif
 
     HRESULT hres = S_OK;
-    if (!CreateDir(fullPath))
+    const bool dirCreated = CreateDir(fullPath);
+    if (!dirCreated)
       hres = GetLastError_noZero_HRESULT();
+    #if defined(__APPLE__) && !defined(UNDER_CE) && !defined(Z7_SFX)
+    if (dirCreated)
+      TryWriteQuarantineAttribute_To_BaseFile(fullPath, ZoneBuf);
+    #endif
     if (isFinalDir)
     {
       if (!NFile::NFind::DoesDirExist(fullPath))
@@ -1973,6 +2001,12 @@ HRESULT CArchiveExtractCallback::CloseFile()
         // SendMessageError_with_LastError("Can't write Zone.Identifier stream", path);
       }
     }
+  }
+ #elif defined(__APPLE__) && !defined(UNDER_CE) && !defined(Z7_SFX)
+  if (ZoneBuf.Size() != 0
+      && !_item.IsAltStream)
+  {
+    TryWriteQuarantineAttribute_To_BaseFile(_diskFilePath, ZoneBuf);
   }
  #endif
 
