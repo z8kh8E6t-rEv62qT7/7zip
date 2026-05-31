@@ -30,6 +30,7 @@
 
 #include "EnumDirItems.h"
 #include "SetProperties.h"
+#include "SortUtils.h"
 #include "TempFiles.h"
 #include "UpdateCallback.h"
 
@@ -336,6 +337,304 @@ bool CRenamePair::GetNewPath(bool isFolder, const UString &src, UString &dest) c
   }
   dest = NewName + src.Ptr(num);
   return true;
+}
+
+static bool GetFullPath_for_InputItem(CFSTR path, FString &fullPath)
+{
+  if (MyGetFullPathName(path, fullPath))
+    return true;
+  fullPath = path;
+  return !fullPath.IsEmpty();
+}
+
+static void TrimTrailingPathSeparators_for_InputItem(FString &path)
+{
+  for (;;)
+  {
+    const unsigned len = path.Len();
+    if (len <= 1 || !IsPathSepar(path[len - 1]))
+      return;
+   #ifdef _WIN32
+    if (IsDriveRootPath_SuperAllowed(path) || IsNetworkShareRootPath(path))
+      return;
+   #endif
+    path.DeleteBack();
+  }
+}
+
+static UString NormalizeInputItemArchivePath(UString path)
+{
+  path.Replace(L'\\', L'/');
+  for (unsigned i = 0; i < path.Len();)
+  {
+    if (path[i] == L'/' && (i == 0 || path[i - 1] == L'/'))
+    {
+      path.Delete(i);
+      continue;
+    }
+    i++;
+  }
+  while (!path.IsEmpty() && path.Back() == L'/')
+    path.DeleteBack();
+  return path;
+}
+
+static bool GetRelativePath_for_InputItem(const FString &itemFullPath,
+    const FString &sourceFullPath, UString &relativePath)
+{
+  relativePath.Empty();
+  FString sourcePath = sourceFullPath;
+  TrimTrailingPathSeparators_for_InputItem(sourcePath);
+  if (CompareFileNames(itemFullPath, sourcePath) == 0)
+    return true;
+
+  const unsigned sourceLen = sourcePath.Len();
+  if (itemFullPath.Len() <= sourceLen ||
+      !IsPathSepar(itemFullPath[sourceLen]))
+    return false;
+
+  FString prefix;
+  prefix.SetFrom(itemFullPath, sourceLen);
+  if (CompareFileNames(prefix, sourcePath) != 0)
+    return false;
+
+  relativePath = fs2us(itemFullPath.Ptr(sourceLen + 1));
+  relativePath = NormalizeInputItemArchivePath(relativePath);
+  return true;
+}
+
+static UString GetLogRoot_for_InputItem(CFSTR sourcePath)
+{
+  UString path = NormalizeInputItemArchivePath(fs2us(sourcePath));
+  const int slashPos = path.ReverseFind_PathSepar();
+  if (slashPos >= 0)
+    path.DeleteFrontal((unsigned)slashPos + 1);
+  return path;
+}
+
+static bool GetRelativeLogPath_for_InputItem(const UString &itemLogPath,
+    const UString &sourceLogRoot, UString &relativePath)
+{
+  relativePath.Empty();
+  if (sourceLogRoot.IsEmpty())
+    return false;
+  if (CompareFileNames(itemLogPath, sourceLogRoot) == 0)
+    return true;
+
+  const unsigned sourceLen = sourceLogRoot.Len();
+  if (itemLogPath.Len() <= sourceLen ||
+      !IsPathSepar(itemLogPath[sourceLen]))
+    return false;
+
+  UString prefix;
+  prefix.SetFrom(itemLogPath, sourceLen);
+  if (CompareFileNames(prefix, sourceLogRoot) != 0)
+    return false;
+
+  relativePath = itemLogPath.Ptr(sourceLen + 1);
+  return true;
+}
+
+static void SetDirItemLogPath(CDirItems &dirItems, CDirItem &dirItem, UString logPath)
+{
+  logPath = NormalizeInputItemArchivePath(logPath);
+  const int slashPos = logPath.ReverseFind_PathSepar();
+  if (slashPos >= 0)
+  {
+    dirItem.LogParent = (int)dirItems.AddPrefix(
+        -1, -1, logPath.Left((unsigned)slashPos + 1));
+    dirItem.LogName = logPath.Ptr((unsigned)slashPos + 1);
+  }
+  else
+  {
+    dirItem.LogParent = -1;
+    dirItem.LogName = logPath;
+  }
+}
+
+static void RebuildDirItemsStat(CDirItems &dirItems)
+{
+  CDirItemsStat stat;
+  FOR_VECTOR (i, dirItems.Items)
+  {
+    const CDirItem &dirItem = dirItems.Items[i];
+    if (dirItem.IsDir())
+      stat.NumDirs++;
+   #ifdef _WIN32
+    else if (dirItem.IsAltStream)
+    {
+      stat.NumAltStreams++;
+      stat.AltStreamsSize += dirItem.Size;
+    }
+   #endif
+    else
+    {
+      stat.NumFiles++;
+      stat.FilesSize += dirItem.Size;
+    }
+  }
+  dirItems.Stat = stat;
+}
+
+static void RemoveInputItemDuplicateLogPaths(CDirItems &dirItems,
+    const CIntVector &mapIndexes)
+{
+  const unsigned numItems = dirItems.Items.Size();
+  if (numItems < 2 || mapIndexes.Size() != numItems)
+    return;
+
+  UStringVector logPaths;
+  logPaths.ClearAndReserve(numItems);
+  FOR_VECTOR (i, dirItems.Items)
+    logPaths.AddInReserved(dirItems.GetLogPath(i));
+
+  CUIntVector sortedIndexes;
+  SortFileNames(logPaths, sortedIndexes);
+
+  CRecordVector<Byte> keep;
+  keep.ClearAndSetSize(numItems);
+  for (unsigned i = 0; i < numItems; i++)
+    keep[i] = 1;
+
+  bool removed = false;
+  for (unsigned groupStart = 0; groupStart < numItems;)
+  {
+    unsigned groupEnd = groupStart + 1;
+    while (groupEnd < numItems &&
+           CompareFileNames(logPaths[sortedIndexes[groupStart]],
+                            logPaths[sortedIndexes[groupEnd]]) == 0)
+      groupEnd++;
+
+    if (groupEnd - groupStart > 1)
+    {
+      unsigned bestIndex = sortedIndexes[groupStart];
+      for (unsigned pos = groupStart + 1; pos < groupEnd; pos++)
+      {
+        const unsigned candidateIndex = sortedIndexes[pos];
+        if (mapIndexes[candidateIndex] > mapIndexes[bestIndex] ||
+            (mapIndexes[candidateIndex] == mapIndexes[bestIndex] &&
+             candidateIndex > bestIndex))
+          bestIndex = candidateIndex;
+      }
+      for (unsigned pos = groupStart; pos < groupEnd; pos++)
+      {
+        const unsigned duplicateIndex = sortedIndexes[pos];
+        if (duplicateIndex != bestIndex)
+        {
+          keep[duplicateIndex] = 0;
+          removed = true;
+        }
+      }
+    }
+
+    groupStart = groupEnd;
+  }
+
+  if (!removed)
+    return;
+
+  for (unsigned i = numItems; i != 0; i--)
+    if (keep[i - 1] == 0)
+      dirItems.Items.Delete(i - 1);
+  RebuildDirItemsStat(dirItems);
+}
+
+static bool BuildInputItemArchiveCensor(
+    const CUpdateOptions &options,
+    NWildcard::CCensor &archiveCensor)
+{
+  if (options.InputItemArchivePaths.IsEmpty())
+    return false;
+
+  NWildcard::CCensorPathProps props;
+  props.WildcardMatching = false;
+  FOR_VECTOR (i, options.InputItemArchivePaths)
+  {
+    const UString archivePath =
+        NormalizeInputItemArchivePath(options.InputItemArchivePaths[i]);
+    if (!archivePath.IsEmpty())
+      archiveCensor.AddItem(NWildcard::k_RelatPath, true, archivePath, props);
+  }
+  archiveCensor.ExtendExclude();
+  return true;
+}
+
+static HRESULT ApplyInputItemPathRemaps(CDirItems &dirItems,
+    const CUpdateOptions &options)
+{
+  if (options.InputItemSourcePaths.IsEmpty())
+    return S_OK;
+  if (options.InputItemSourcePaths.Size() != options.InputItemArchivePaths.Size())
+    return E_INVALIDARG;
+
+  FStringVector fullSourcePaths;
+  fullSourcePaths.ClearAndReserve(options.InputItemSourcePaths.Size());
+  FOR_VECTOR (i, options.InputItemSourcePaths)
+  {
+    FString fullSourcePath;
+    if (!GetFullPath_for_InputItem(options.InputItemSourcePaths[i], fullSourcePath))
+      return E_INVALIDARG;
+    fullSourcePaths.AddInReserved(fullSourcePath);
+  }
+  UStringVector sourceLogRoots;
+  sourceLogRoots.ClearAndReserve(options.InputItemSourcePaths.Size());
+  FOR_VECTOR (i, options.InputItemSourcePaths)
+    sourceLogRoots.AddInReserved(GetLogRoot_for_InputItem(options.InputItemSourcePaths[i]));
+
+  CIntVector mapIndexes;
+  mapIndexes.ClearAndSetSize(dirItems.Items.Size());
+  for (unsigned i = 0; i < mapIndexes.Size(); i++)
+    mapIndexes[i] = -1;
+
+  FOR_VECTOR (itemIndex, dirItems.Items)
+  {
+    FString itemFullPath;
+    const UString itemLogPath = dirItems.GetLogPath(itemIndex);
+    if (!GetFullPath_for_InputItem(dirItems.GetPhyPath(itemIndex), itemFullPath))
+      itemFullPath.Empty();
+
+    int bestIndex = -1;
+    UString bestRelativePath;
+    unsigned bestSourceLen = 0;
+    FOR_VECTOR (mapIndex, fullSourcePaths)
+    {
+      UString relativePath;
+      bool matched = false;
+      if (!itemFullPath.IsEmpty())
+        matched = GetRelativePath_for_InputItem(itemFullPath,
+                                                fullSourcePaths[mapIndex],
+                                                relativePath);
+      if (!matched)
+        matched = GetRelativeLogPath_for_InputItem(itemLogPath,
+                                                   sourceLogRoots[mapIndex],
+                                                   relativePath);
+      if (!matched)
+        continue;
+      const unsigned sourceLen = fullSourcePaths[mapIndex].Len();
+      if (bestIndex >= 0 && sourceLen <= bestSourceLen)
+        continue;
+      bestIndex = (int)mapIndex;
+      bestSourceLen = sourceLen;
+      bestRelativePath = relativePath;
+    }
+
+    if (bestIndex < 0)
+      continue;
+    mapIndexes[itemIndex] = bestIndex;
+
+    UString mappedPath =
+        NormalizeInputItemArchivePath(options.InputItemArchivePaths[(unsigned)bestIndex]);
+    if (!bestRelativePath.IsEmpty())
+    {
+      if (!mappedPath.IsEmpty())
+        mappedPath.Add_PathSepar();
+      mappedPath += bestRelativePath;
+    }
+    SetDirItemLogPath(dirItems, dirItems.Items[itemIndex], mappedPath);
+  }
+
+  RemoveInputItemDuplicateLogPaths(dirItems, mapIndexes);
+  return S_OK;
 }
 
 #ifdef SUPPORT_ALT_STREAMS
@@ -1405,6 +1704,8 @@ HRESULT UpdateArchive(
           errorInfo.Message = "Scanning error";
         return res;
       }
+
+      RINOK(ApplyInputItemPathRemaps(dirItems, options))
       
       RINOK(callback->FinishScanning(dirItems.Stat))
 
@@ -1528,9 +1829,13 @@ HRESULT UpdateArchive(
   CObjectVector<CArcItem> arcItems;
   if (thereIsInArchive)
   {
+    NWildcard::CCensor inputItemArchiveCensor;
+    const NWildcard::CCensor *archiveCensor = &censor;
+    if (BuildInputItemArchiveCensor(options, inputItemArchiveCensor))
+      archiveCensor = &inputItemArchiveCensor;
     RINOK(EnumerateInArchiveItems(
       // options.StoreAltStreams,
-      censor, arcLink.Arcs.Back(), arcItems))
+      *archiveCensor, arcLink.Arcs.Back(), arcItems))
   }
 
   /*

@@ -117,6 +117,8 @@ struct CUpdateOptions
   UString EMailAddress;
   FString WorkingDir;
   UString AddPathPrefix;
+  FStringVector InputItemSourcePaths;
+  UStringVector InputItemArchivePaths;
 
   CObjectVector<CRenamePair> RenamePairs;
   CRecordVector<UInt64> VolumesSizes;

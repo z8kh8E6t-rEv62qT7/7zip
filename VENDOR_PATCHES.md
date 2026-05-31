@@ -29,9 +29,22 @@ Current local content in this tree falls into two groups:
 
 - CPP/7zip/UI/Common/Update.h
 - CPP/7zip/UI/Common/Update.cpp
+- CPP/7zip/UI/Common/DirItem.h
+- CPP/7zip/UI/Common/EnumDirItems.cpp
   Restore AddPathPrefix in CUpdateOptions and pass it to EnumerateItems().
   This keeps update/add flows aligned with the caller-supplied path prefix
   instead of silently dropping it.
+
+  Add direct input-item path mapping for the Qt/native backend. CUpdateOptions
+  now carries parallel physical source paths and archive-relative destination
+  paths, CDirItem can override its logical name with LogName, and CDirItems::
+  GetLogPath() uses that override when present. Update.cpp maps scanned disk
+  items onto the requested archive paths, preserves directory subtrees, removes
+  duplicate mapped logical paths so later explicit inputs override earlier
+  directory-scanned entries, and uses a separate archive-path censor when
+  updating an existing archive. This matches the original 7-Zip update model of
+  separating physical file names from archive item names and avoids a first-party
+  staging tree for AddRequest::input_items.
 
 - CPP/7zip/UI/Common/ArchiveExtractCallback.h
 - CPP/7zip/UI/Common/ArchiveExtractCallback.cpp
@@ -75,4 +88,4 @@ When refreshing upstream
 - Keep official assets such as Lang/* and DOC/unRarLicense.txt in sync with the
   same snapshot.
 - Reapply only the local patches documented above.
-- Update this README if the local delta changes.
+- Update this file if the local delta changes.

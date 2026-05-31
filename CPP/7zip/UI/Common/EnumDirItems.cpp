@@ -150,7 +150,9 @@ FString CDirItems::GetPhyPath(unsigned index) const
 UString CDirItems::GetLogPath(unsigned index) const
 {
   const CDirItem &di = Items[index];
-  return GetPrefixesPath(LogParents, di.LogParent, di.Name);
+  return GetPrefixesPath(LogParents,
+      di.LogParent,
+      di.LogName.IsEmpty() ? di.Name : di.LogName);
 }
 
 void CDirItems::ReserveDown()

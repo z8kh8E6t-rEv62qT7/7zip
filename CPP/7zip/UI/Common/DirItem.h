@@ -231,6 +231,7 @@ struct CArcTime
 struct CDirItem: public NWindows::NFile::NFind::CFileInfoBase
 {
   UString Name;
+  UString LogName;
   
  #ifndef UNDER_CE
   CByteBuffer ReparseData;
