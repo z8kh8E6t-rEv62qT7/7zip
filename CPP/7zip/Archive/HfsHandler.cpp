@@ -367,20 +367,19 @@ struct CItem
   UInt32 ATime;
   // UInt32 BackupDate;
 
+  UInt32 LinkReference;
+  UInt32 FileType;
+  UInt32 FileCreator;
+  Byte FinderInfo[32];
+  bool IsHardLinkPrivateDirectory;
+  bool IsPrivateMetadata;
+  bool IsIndirectNode;
+
   /*
   UInt32 OwnerID;
   UInt32 GroupID;
   Byte AdminFlags;
   Byte OwnerFlags;
-  union
-  {
-    UInt32  iNodeNum;
-    UInt32  LinkCount;
-    UInt32  RawDevice;
-  } special;
-
-  UInt32 FileType;
-  UInt32 FileCreator;
   UInt16 FinderFlags;
   UInt16 Point[2];
   */
@@ -393,9 +392,22 @@ struct CItem
   CCompressHeader CompressHeader;
 
   CItem():
+      LinkReference(0),
+      FileType(0),
+      FileCreator(0),
+      IsHardLinkPrivateDirectory(false),
+      IsPrivateMetadata(false),
+      IsIndirectNode(false),
       decmpfs_AttrIndex(-1)
-      {}
+      { memset(FinderInfo, 0, sizeof(FinderInfo)); }
   bool IsDir() const { return Type == RECORD_TYPE_FOLDER; }
+  bool IsHardLink() const
+  {
+    return !IsDir()
+        && LinkReference != 0
+        && FileType == 0x686C6E6B // 'hlnk'
+        && FileCreator == 0x6866732B; // 'hfs+'
+  }
   // const CFork *GetFork(bool isResource) const { return (isResource ? &ResourceFork: &DataFork); }
 };
 
@@ -455,6 +467,7 @@ public:
   CRecordVector<CRef> Refs;
   CObjectVector<CItem> Items;
   CObjectVector<CAttr> Attrs;
+  CRecordVector<CIdIndexPair> HardLinkToItemMap;
 
   // CByteBuffer AttrBuf;
 
@@ -486,14 +499,27 @@ public:
     Refs.Clear();
     Items.Clear();
     Attrs.Clear();
+    HardLinkToItemMap.Clear();
     // AttrBuf.Free();
+  }
+
+  unsigned GetDataItemIndex(const CRef &ref) const
+  {
+    const CItem &item = Items[ref.ItemIndex];
+    if (ref.IsItem() && item.IsHardLink())
+    {
+      const int target = FindItemIndex(HardLinkToItemMap, item.LinkReference);
+      if (target >= 0)
+        return (unsigned)target;
+    }
+    return ref.ItemIndex;
   }
 
   UInt64 Get_UnpackSize_of_Ref(const CRef &ref) const
   {
     if (ref.AttrIndex >= 0)
       return Attrs[ref.AttrIndex].GetSize();
-    const CItem &item = Items[ref.ItemIndex];
+    const CItem &item = Items[GetDataItemIndex(ref)];
     if (ref.IsResource())
       return item.ResourceFork.Size;
     if (item.IsDir())
@@ -1135,6 +1161,8 @@ HRESULT CDatabase::LoadCatalog(const CFork &fork, const CObjectVector<CIdExtents
             {
               // it's folder for "Hard Links" files
               item.Name = "[HFS+ Private Data]";
+              item.IsHardLinkPrivateDirectory = true;
+              item.IsPrivateMetadata = true;
             }
           }
 
@@ -1142,6 +1170,11 @@ HRESULT CDatabase::LoadCatalog(const CFork &fork, const CObjectVector<CIdExtents
           if (item.Name.IsEmpty() || item.Name[0] == L' ')
             item.Name = "[]";
         }
+        // HFS+ stores directory hard-link records below this reserved
+        // metadata directory.  It is an implementation detail of the
+        // filesystem and must not be presented as user data.
+        if (item.Name.IsEqualTo(".HFS+ Private Directory Data\r"))
+          item.IsPrivateMetadata = true;
       }
 
       item.CTime = Get32(r + 0xC);
@@ -1157,10 +1190,17 @@ HRESULT CDatabase::LoadCatalog(const CFork &fork, const CObjectVector<CIdExtents
       item.OwnerFlags = r[0x29];
       */
       item.FileMode = Get16(r + 0x2A);
-      /*
-      item.special.iNodeNum = Get16(r + 0x2C); // or .linkCount
+      item.LinkReference = Get32(r + 0x2C); // iNodeNum for hard-link records
+      // HFSPlusCatalogFile and HFSPlusCatalogFolder store the two 16-byte
+      // Finder records contiguously at offsets 0x30 and 0x40. The mounted
+      // filesystem exposes FileInfo plus the extended Finder flags through
+      // com.apple.FinderInfo, while hiding catalog-maintained reserved/date
+      // and put-away fields. Mirror that public 32-byte view here.
+      memcpy(item.FinderInfo, r + 0x30, 14);
+      memcpy(item.FinderInfo + 24, r + 0x48, 2);
       item.FileType = Get32(r + 0x30);
       item.FileCreator = Get32(r + 0x34);
+      /*
       item.FinderFlags = Get16(r + 0x38);
       item.Point[0] = Get16(r + 0x3A); // v
       item.Point[1] = Get16(r + 0x3C); // h
@@ -1219,11 +1259,120 @@ HRESULT CDatabase::LoadCatalog(const CFork &fork, const CObjectVector<CIdExtents
         return S_FALSE;
   }
 
+  // Propagate the private-metadata marker to every descendant before public
+  // item references are built.  The payload Items stay available internally
+  // so user-visible hard links can still resolve their shared data fork.
+  {
+    FOR_VECTOR (i, Items)
+    {
+      CItem &item = Items[i];
+      if (item.IsPrivateMetadata)
+        continue;
+      UInt32 parentID = item.ParentID;
+      for (unsigned depth = 0; depth < Items.Size(); ++depth)
+      {
+        const int parentIndex = FindItemIndex(IdToIndexMap, parentID);
+        if (parentIndex < 0)
+          break;
+        const CItem &parent = Items[(unsigned)parentIndex];
+        if (parent.IsPrivateMetadata)
+        {
+          item.IsPrivateMetadata = true;
+          break;
+        }
+        if (parent.ParentID == parentID)
+          break;
+        parentID = parent.ParentID;
+      }
+    }
+  }
+
+  // HFS+ stores hard-link payloads as iNode<reference> files below the
+  // private metadata directory. Build the relationship from catalog Items,
+  // without exposing those implementation files through Refs.
+  {
+    FOR_VECTOR (i, Items)
+    {
+      CItem &item = Items[i];
+      if (item.IsDir())
+        continue;
+      const int parentIndex = FindItemIndex(IdToIndexMap, item.ParentID);
+      if (parentIndex < 0 || !Items[(unsigned)parentIndex].IsHardLinkPrivateDirectory)
+        continue;
+      const UString &name = item.Name;
+      if (name.Len() <= 5 || name[0] != L'i' || name[1] != L'N' || name[2] != L'o'
+          || name[3] != L'd' || name[4] != L'e')
+        continue;
+      UInt64 linkReference = 0;
+      bool valid = true;
+      for (unsigned pos = 5; pos < name.Len(); ++pos)
+      {
+        const wchar_t c = name[pos];
+        if (c < L'0' || c > L'9')
+        {
+          valid = false;
+          break;
+        }
+        linkReference = linkReference * 10 + (unsigned)(c - L'0');
+        if (linkReference > 0xFFFFFFFF)
+        {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid || linkReference == 0)
+        continue;
+      item.LinkReference = (UInt32)linkReference;
+      item.IsIndirectNode = true;
+      CIdIndexPair pair;
+      pair.ID = item.LinkReference;
+      pair.Index = i;
+      HardLinkToItemMap.Add(pair);
+    }
+    HardLinkToItemMap.Sort2();
+    for (unsigned i = 1; i < HardLinkToItemMap.Size(); ++i)
+      if (HardLinkToItemMap[i - 1].ID == HardLinkToItemMap[i].ID)
+        HeadersError = true;
+  }
+
+  #ifdef HFS_SHOW_ALT_STREAMS
+  // FinderInfo is embedded in each catalog record rather than in the HFS+
+  // attributes B-tree. Expose non-empty values through the same alternate-
+  // stream interface as native attributes so extraction can restore them.
+  // A hard-link record contains the hlnk/hfs+ marker in this field, not the
+  // user's Finder metadata, so it must not be materialized as FinderInfo.
+  {
+    FOR_VECTOR (i, Items)
+    {
+      const CItem &item = Items[i];
+      if (item.IsPrivateMetadata || item.IsHardLink())
+        continue;
+      bool nonZero = false;
+      for (unsigned j = 0; j < sizeof(item.FinderInfo); ++j)
+        if (item.FinderInfo[j] != 0)
+        {
+          nonZero = true;
+          break;
+        }
+      if (!nonZero)
+        continue;
+      CAttr &attr = Attrs.AddNew();
+      attr.ID = item.ID;
+      attr.Name = "com.apple.FinderInfo";
+      attr.Data.Alloc(sizeof(item.FinderInfo));
+      memcpy(attr.Data, item.FinderInfo, sizeof(item.FinderInfo));
+    }
+  }
+  #endif
+
  
   CBoolArr skipAttr(Attrs.Size());
   {
     for (unsigned i = 0; i < Attrs.Size(); i++)
-      skipAttr[i] = false;
+    {
+      const int itemIndex = FindItemIndex(IdToIndexMap, Attrs[i].ID);
+      skipAttr[i] = itemIndex >= 0 && Items[(unsigned)itemIndex].IsPrivateMetadata;
+    }
   }
 
   {
@@ -1252,6 +1401,9 @@ HRESULT CDatabase::LoadCatalog(const CFork &fork, const CObjectVector<CIdExtents
     FOR_VECTOR (i, Items)
     {
       const CItem &item = Items[i];
+
+      if (item.IsPrivateMetadata)
+        continue;
 
       CIdIndexPair pair;
       pair.ID = item.ID;
@@ -1584,6 +1736,7 @@ static const Byte kProps[] =
   kpidATime,
   kpidChangeTime,
   kpidPosixAttrib,
+  kpidINode,
   /*
   kpidUserId,
   kpidGroupId,
@@ -1720,7 +1873,8 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
   COM_TRY_BEGIN
   NWindows::NCOM::CPropVariant prop;
   const CRef &ref = Refs[index];
-  const CItem &item = Items[ref.ItemIndex];
+  const CItem &storedItem = Items[ref.ItemIndex];
+  const CItem &item = Items[GetDataItemIndex(ref)];
   switch (propID)
   {
     case kpidPath: GetItemPath(index, prop); break;
@@ -1779,13 +1933,18 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         prop = size;
         break;
       }
-    case kpidIsDir: prop = (ref.IsItem() && item.IsDir()); break;
+    case kpidIsDir: prop = (ref.IsItem() && storedItem.IsDir()); break;
     case kpidIsAltStream: prop = ref.IsAltStream(); break;
     case kpidCTime: HfsTimeToProp(item.CTime, prop); break;
     case kpidMTime: HfsTimeToProp(item.MTime, prop); break;
     case kpidATime: HfsTimeToProp(item.ATime, prop); break;
     case kpidChangeTime: HfsTimeToProp(item.AttrMTime, prop); break;
     case kpidPosixAttrib: if (ref.IsItem()) prop = (UInt32)item.FileMode; break;
+    case kpidINode:
+      if (ref.IsItem() && storedItem.LinkReference != 0
+          && (storedItem.IsHardLink() || storedItem.IsIndirectNode))
+        prop = storedItem.LinkReference;
+      break;
     /*
     case kpidUserId: prop = (UInt32)item.OwnerID; break;
     case kpidGroupId: prop = (UInt32)item.GroupID; break;
@@ -2395,7 +2554,8 @@ Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
       break;
     const UInt32 index = allFilesMode ? i : indices[i];
     const CRef &ref = Refs[index];
-    const CItem &item = Items[ref.ItemIndex];
+    const CItem &storedItem = Items[ref.ItemIndex];
+    const CItem &item = Items[GetDataItemIndex(ref)];
     currentItemSize = Get_UnpackSize_of_Ref(ref);
 
     int opRes;
@@ -2406,7 +2566,7 @@ Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
         NExtract::NAskMode::kExtract;
     RINOK(extractCallback->GetStream(index, &realOutStream, askMode))
 
-    if (ref.IsItem() && item.IsDir())
+    if (ref.IsItem() && storedItem.IsDir())
     {
       RINOK(extractCallback->PrepareOperation(askMode))
       RINOK(extractCallback->SetOperationResult(NExtract::NOperationResult::kOK))
@@ -2600,7 +2760,7 @@ Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
   }
   else
   {
-    const CItem &item = Items[ref.ItemIndex];
+    const CItem &item = Items[GetDataItemIndex(ref)];
     if (ref.IsResource())
       fork = &item.ResourceFork;
     else if (item.IsDir())

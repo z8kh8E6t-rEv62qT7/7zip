@@ -4037,7 +4037,7 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       if (!ref.IsAltStream())
      #endif
       if (IsViDef(ref.NodeIndex))
-        prop = (UInt32)vol.NodeIDs[ref.NodeIndex];
+        prop = (UInt64)vol.NodeIDs[ref.NodeIndex];
       break;
 
     case kpidParentINode:
@@ -4045,7 +4045,7 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         if (!ref.IsAltStream())
        #endif
       if (inode)
-        prop = (UInt32)inode->parent_id;
+        prop = (UInt64)inode->parent_id;
       break;
   }
   prop.Detach(value);

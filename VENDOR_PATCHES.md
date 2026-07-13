@@ -75,6 +75,33 @@ Current local content in this tree falls into two groups:
   directory cleanup uses SetFileAttrib_PosixHighDetect(), and update progress
   callbacks use the correct UInt64 type.
 
+- CPP/7zip/Archive/ApfsHandler.cpp
+  Preserve full-width APFS inode and parent-inode identifiers by exposing them
+  as UInt64 properties instead of truncating them to UInt32. This keeps inode
+  identity stable for metadata consumers and hard-link restoration.
+
+- CPP/7zip/Archive/DmgHandler.cpp
+  Prefer the canonical UTF-8 CFName emitted by modern DiskImages when naming
+  partitions, while retaining the legacy Name field as a fallback for older
+  images. This avoids presenting MacRoman bytes that were mis-decoded as UTF-8.
+
+- CPP/7zip/Archive/HfsHandler.cpp
+  Restore HFS+ filesystem semantics needed by native extraction: resolve file
+  hard-link records to their shared private inode payload, expose link identity
+  through kpidINode, hide the private hard-link metadata trees, and surface the
+  public com.apple.FinderInfo value as an alternate stream. Malformed or
+  ambiguous private inode mappings remain visible through the handler's header
+  error state instead of silently selecting duplicate payloads.
+
+- CPP/7zip/Archive/SquashfsHandler.cpp
+  Expose each SquashFS node identifier through kpidINode and advertise inode
+  availability at archive scope so extraction can preserve hard-link identity.
+
+- CPP/7zip/Archive/XarHandler.cpp
+  Decode XAR file names whose XML name element declares base64 encoding, using
+  the existing strict base64 decoder. Reject malformed input, embedded NULs,
+  invalid UTF-8, and unknown encodings instead of accepting unsafe path data.
+
 Patch intent
 - Keep the vendored tree close to upstream.
 - Limit local deltas to macOS support and cross-platform correctness required
@@ -82,7 +109,6 @@ Patch intent
 - Prefer removing a local patch when upstream gains an equivalent fix.
 
 When refreshing upstream
-- Replace this tree with a clean upstream 7-Zip source snapshot.
 - Replace this tree with a clean upstream 7-Zip 26.01-or-newer source
   snapshot.
 - Keep official assets such as Lang/* and DOC/unRarLicense.txt in sync with the

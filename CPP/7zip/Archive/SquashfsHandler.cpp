@@ -932,6 +932,7 @@ static const Byte kProps[] =
   kpidPackSize,
   kpidMTime,
   kpidPosixAttrib,
+  kpidINode,
   kpidUserId,
   kpidGroupId
   // kpidLinks,
@@ -1978,6 +1979,7 @@ Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
       break;
     }
     case kpidClusterSize: prop = _h.BlockSize; break;
+    case kpidINode: prop = true; break;
     case kpidBigEndian: prop = _h.be; break;
     case kpidCTime:
       if (_h.CTime != 0)
@@ -2082,6 +2084,7 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
         prop = (UInt32)(node.Mode & 0xFFF) | k_TypeToMode[node.Type];
       break;
     }
+    case kpidINode: prop = (UInt32)item.Node; break;
     case kpidUserId:
     case kpidGroupId:
     {

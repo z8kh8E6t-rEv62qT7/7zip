@@ -1299,9 +1299,14 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *openArchiveCall
              <string> (Apple_Free : 3)</string>
            maybe we shoud fix xml code and return full string with space.
         */
-        const AString *name = GetStringFromKeyPair(item, "Name", "string");
+        // CFName is the canonical UTF-8 display name emitted by modern
+        // DiskImages.  The legacy Name field can contain MacRoman bytes that
+        // have already been mis-decoded as UTF-8 (for example, full-width
+        // punctuation becomes "Ôº...").  Prefer CFName and retain Name only
+        // as a compatibility fallback for older images.
+        const AString *name = GetStringFromKeyPair(item, "CFName", "string");
         if (!name || name->IsEmpty())
-          name = GetStringFromKeyPair(item, "CFName", "string");
+          name = GetStringFromKeyPair(item, "Name", "string");
         if (name)
           file.Name = *name;
       }

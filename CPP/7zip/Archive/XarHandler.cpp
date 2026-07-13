@@ -27,6 +27,10 @@
 
 #include "Common/OutStreamWithSha1.h"
 
+// Shared strict decoder implemented by Base64Handler.cpp and also used by
+// DmgHandler.cpp. It returns NULL for malformed input.
+Byte *Base64ToBin(Byte *dest, const char *src);
+
 using namespace NWindows;
 
 #define XAR_SHOW_RAW
@@ -427,8 +431,31 @@ static bool AddItem(const CXmlItem &item, CObjectVector<CFile> &files, int paren
       if (*end == 0)
         file.Id_Defined = true;
     }
-    file.Name = item.GetSubStringForTag("name");
-    z7_xml_DecodeString(file.Name);
+    {
+      const CXmlItem *nameItem = item.FindSubTag_GetPtr("name");
+      if (!nameItem)
+        return false;
+      file.Name = nameItem->GetSubString();
+      const AString enctype = nameItem->GetPropVal("enctype");
+      if (enctype.IsEmpty())
+        z7_xml_DecodeString(file.Name);
+      else if (enctype.IsEqualTo_Ascii_NoCase("base64"))
+      {
+        CByteBuffer decoded(file.Name.Len() / 4 * 3 + 4);
+        Byte * const end = Base64ToBin(decoded, file.Name);
+        if (!end)
+          return false;
+        const unsigned size = (unsigned)(end - (Byte *)decoded);
+        for (unsigned i = 0; i < size; ++i)
+          if (decoded[i] == 0)
+            return false;
+        file.Name.SetFrom((const char *)(const Byte *)decoded, size);
+        if (!CheckUTF8_AString(file.Name))
+          return false;
+      }
+      else
+        return false;
+    }
     {
       const CXmlItem *typeItem = item.FindSubTag_GetPtr("type");
       if (typeItem)
