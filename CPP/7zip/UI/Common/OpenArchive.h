@@ -126,6 +126,8 @@ struct COpenOptions
   IArchiveOpenCallback *callback;
   COpenCallbackImp *callbackSpec; // it's used for SFX only
   OPEN_PROPS_DECL
+  bool filenameCodePageDefined;
+  UInt32 filenameCodePage;
   // bool openOnlySpecifiedByExtension,
 
   bool stdInMode;
@@ -139,6 +141,8 @@ struct COpenOptions
       seqStream(NULL),
       callback(NULL),
       callbackSpec(NULL),
+      filenameCodePageDefined(false),
+      filenameCodePage(0),
       stdInMode(false)
     {}
 

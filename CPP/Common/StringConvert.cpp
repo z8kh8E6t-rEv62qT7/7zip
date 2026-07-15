@@ -21,7 +21,34 @@
 
 static const char k_DefultChar = '_';
 
+static thread_local UINT g_ThreadArchiveFilenameCodePage = 0;
+
+UINT SetThreadArchiveFilenameCodePage(UINT codePage)
+{
+  const UINT previous = g_ThreadArchiveFilenameCodePage;
+  g_ThreadArchiveFilenameCodePage = codePage;
+  return previous;
+}
+
+UINT GetThreadArchiveFilenameCodePage()
+{
+  return g_ThreadArchiveFilenameCodePage;
+}
+
+static UINT ResolveArchiveFilenameCodePage(UINT codePage)
+{
+  if (g_ThreadArchiveFilenameCodePage != 0
+      && (codePage == CP_ACP || codePage == CP_OEMCP))
+    return g_ThreadArchiveFilenameCodePage;
+  return codePage;
+}
+
 #ifdef _WIN32
+
+bool IsArchiveFilenameCodePageSupported(UINT codePage)
+{
+  return codePage >= 2 && IsValidCodePage(codePage) != FALSE;
+}
 
 /*
 MultiByteToWideChar(CodePage, DWORD dwFlags,
@@ -52,6 +79,7 @@ MultiByteToWideChar(CodePage, DWORD dwFlags,
 
 void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
 {
+  codePage = ResolveArchiveFilenameCodePage(codePage);
   dest.Empty();
   if (src.IsEmpty())
     return;
@@ -343,105 +371,264 @@ static bool TryConvertWithCodePageName(UString &dest, const AString &src, UINT c
   return TryConvertWithIconv(dest, src, temp);
 }
 
+static const char * const *GetCodePageAliases(UINT codePage, unsigned &numAliases)
+{
+  numAliases = 0;
+  switch (codePage)
+  {
+    case 932:
+    {
+      static const char * const kAliases[] = { "CP932", "SHIFT_JIS" };
+      numAliases = 2;
+      return kAliases;
+    }
+    case 936:
+    {
+      static const char * const kAliases[] = { "CP936", "GBK" };
+      numAliases = 2;
+      return kAliases;
+    }
+    case 949:
+    {
+      static const char * const kAliases[] = { "CP949", "UHC" };
+      numAliases = 2;
+      return kAliases;
+    }
+    case 950:
+    {
+      static const char * const kAliases[] = { "CP950", "BIG5" };
+      numAliases = 2;
+      return kAliases;
+    }
+    case 51932:
+    {
+      static const char * const kAliases[] = { "EUC-JP" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 51949:
+    {
+      static const char * const kAliases[] = { "EUC-KR" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 54936:
+    {
+      static const char * const kAliases[] = { "GB18030" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 20866:
+    {
+      static const char * const kAliases[] = { "KOI8-R" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 21866:
+    {
+      static const char * const kAliases[] = { "KOI8-U" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 28591: case 28592: case 28593: case 28594: case 28595:
+    case 28596: case 28597: case 28598: case 28599:
+    {
+      static const char * const kAliases[] = {
+        "ISO-8859-1", "ISO-8859-2", "ISO-8859-3", "ISO-8859-4", "ISO-8859-5",
+        "ISO-8859-6", "ISO-8859-7", "ISO-8859-8", "ISO-8859-9"
+      };
+      numAliases = 1;
+      return &kAliases[codePage - 28591];
+    }
+    case 28603:
+    {
+      static const char * const kAliases[] = { "ISO-8859-13" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 28604:
+    {
+      static const char * const kAliases[] = { "ISO-8859-14" };
+      numAliases = 1;
+      return kAliases;
+    }
+    case 28605:
+    {
+      static const char * const kAliases[] = { "ISO-8859-15" };
+      numAliases = 1;
+      return kAliases;
+    }
+    default:
+      return NULL;
+  }
+}
+
+static bool TryUnicodeToMultiByteWithEncoding(AString &dest,
+    const UString &src, const char *encodingName, char defaultChar, bool &defaultCharWasUsed)
+{
+  iconv_t cd = iconv_open(encodingName, "UTF-8");
+  if (cd == (iconv_t)(-1))
+    return false;
+
+  AString utf8;
+  ConvertUnicodeToUTF8(src, utf8);
+  const size_t outSize = ((size_t)utf8.Len() + 1) * 8;
+  char *outBuf = dest.GetBuf((unsigned)outSize);
+  char *outPtr = outBuf;
+  size_t outLeft = outSize;
+  char *inPtr = (char *)(void *)(const char *)utf8;
+  size_t inLeft = utf8.Len();
+  bool ok = true;
+
+  while (inLeft != 0)
+  {
+    const size_t result = iconv(cd, &inPtr, &inLeft, &outPtr, &outLeft);
+    if (result != (size_t)-1)
+      break;
+    if (errno == EILSEQ || errno == EINVAL)
+    {
+      if (outLeft == 0)
+      {
+        ok = false;
+        break;
+      }
+      const Byte first = (Byte)*inPtr;
+      size_t skip = 1;
+      if ((first & 0xE0) == 0xC0) skip = 2;
+      else if ((first & 0xF0) == 0xE0) skip = 3;
+      else if ((first & 0xF8) == 0xF0) skip = 4;
+      if (skip > inLeft)
+        skip = 1;
+      inPtr += skip;
+      inLeft -= skip;
+      *outPtr++ = defaultChar;
+      --outLeft;
+      defaultCharWasUsed = true;
+      // Reset any shift state before converting the next character.
+      iconv(cd, NULL, NULL, NULL, NULL);
+      continue;
+    }
+    ok = false;
+    break;
+  }
+
+  if (ok)
+  {
+    if (iconv(cd, NULL, NULL, &outPtr, &outLeft) == (size_t)-1)
+      ok = false;
+  }
+  iconv_close(cd);
+
+  if (!ok || outLeft == 0)
+  {
+    dest.ReleaseBuf_SetEnd(0);
+    return false;
+  }
+  *outPtr = 0;
+  dest.ReleaseBuf_SetEnd((unsigned)(outPtr - outBuf));
+  return true;
+}
+
+static bool TryUnicodeToMultiByteWithCodePage(AString &dest,
+    const UString &src, UINT codePage, char defaultChar, bool &defaultCharWasUsed)
+{
+  const auto tryEncoding = [&](const char *encodingName) -> bool
+  {
+    bool usedDefault = false;
+    if (!TryUnicodeToMultiByteWithEncoding(dest, src, encodingName, defaultChar, usedDefault))
+      return false;
+    defaultCharWasUsed = usedDefault;
+    return true;
+  };
+
+  unsigned numAliases = 0;
+  const char * const *aliases = GetCodePageAliases(codePage, numAliases);
+  if (aliases)
+  {
+    for (unsigned i = 0; i < numAliases; ++i)
+      if (tryEncoding(aliases[i]))
+        return true;
+    return false;
+  }
+
+  char temp[32];
+  if (codePage >= 1250 && codePage <= 1258)
+  {
+    snprintf(temp, sizeof(temp), "WINDOWS-%u", (unsigned)codePage);
+    if (tryEncoding(temp))
+      return true;
+  }
+  snprintf(temp, sizeof(temp), "CP%u", (unsigned)codePage);
+  if (tryEncoding(temp))
+    return true;
+  snprintf(temp, sizeof(temp), "MS%u", (unsigned)codePage);
+  return tryEncoding(temp);
+}
+
 static bool TryMultiByteToUnicodeStringWithCodePage(UString &dest, const AString &src, UINT codePage)
 {
   if (codePage == CP_UTF8 || codePage == CP_ACP || codePage == CP_OEMCP)
     return false;
 
-  switch (codePage)
+  unsigned numAliases = 0;
+  const char * const *aliases = GetCodePageAliases(codePage, numAliases);
+  if (aliases)
+    return TryConvertWithAliases(dest, src, aliases, numAliases);
+  return TryConvertWithCodePageName(dest, src, codePage);
+}
+
+bool IsArchiveFilenameCodePageSupported(UINT codePage)
+{
+  if (codePage < 2)
+    return false;
+  if (codePage == CP_UTF8)
+    return true;
+
+  unsigned numAliases = 0;
+  const char * const *aliases = GetCodePageAliases(codePage, numAliases);
+  if (aliases)
   {
-    case 932:
+    for (unsigned i = 0; i < numAliases; ++i)
     {
-      static const char * const kAliases[] = { "SHIFT_JIS", "CP932" };
-      return TryConvertWithAliases(dest, src, kAliases, 2);
+      iconv_t cd = iconv_open("UTF-8", aliases[i]);
+      if (cd != (iconv_t)(-1))
+      {
+        iconv_close(cd);
+        return true;
+      }
     }
-    case 936:
-    {
-      static const char * const kAliases[] = { "GB18030", "GBK", "CP936" };
-      return TryConvertWithAliases(dest, src, kAliases, 3);
-    }
-    case 949:
-    {
-      static const char * const kAliases[] = { "EUC-KR", "CP949" };
-      return TryConvertWithAliases(dest, src, kAliases, 2);
-    }
-    case 950:
-    {
-      static const char * const kAliases[] = { "BIG5", "CP950" };
-      return TryConvertWithAliases(dest, src, kAliases, 2);
-    }
-    case 51949:
-    {
-      static const char * const kAliases[] = { "EUC-KR" };
-      return TryConvertWithAliases(dest, src, kAliases, 1);
-    }
-    case 54936:
-    {
-      static const char * const kAliases[] = { "GB18030", "GBK" };
-      return TryConvertWithAliases(dest, src, kAliases, 2);
-    }
-    default:
-      return TryConvertWithCodePageName(dest, src, codePage);
+    return false;
   }
-}
 
-#ifdef __APPLE__
-static bool ContainsUnicodeReplacementCharacter(const UString &s)
-{
-  for (unsigned i = 0; i < s.Len(); ++i)
-    if ((unsigned)s[i] == 0xFFFD)
-      return true;
-  return false;
-}
-
-static bool TryConvertWithRoundTrip(UString &dest, const AString &src, const char *encodingName)
-{
-  AString utf8;
-  if (!ConvertWithIconvRaw(utf8, src, encodingName, "UTF-8"))
-    return false;
-
-  AString roundTrip;
-  if (!ConvertWithIconvRaw(roundTrip, utf8, "UTF-8", encodingName))
-    return false;
-
-  if (roundTrip.Len() != src.Len() || memcmp((const char *)roundTrip, (const char *)src, src.Len()) != 0)
-    return false;
-
-  if (!ConvertUTF8ToUnicode(utf8, dest))
-    return false;
-
-  return !ContainsUnicodeReplacementCharacter(dest);
-}
-
-static bool TryAutoDetectLegacyEncoding(UString &dest, const AString &src)
-{
-  if (src.IsEmpty() || CheckUTF8_AString(src))
-    return false;
-
-  static const char * const kCandidates[] =
+  char temp[32];
+  if (codePage >= 1250 && codePage <= 1258)
   {
-    "GB18030",
-    "GBK",
-    "CP936",
-    "BIG5",
-    "CP950",
-    "SHIFT_JIS",
-    "CP932",
-    "EUC-KR",
-    "CP949",
-    "WINDOWS-1251",
-    "WINDOWS-1252"
-  };
-
-  for (unsigned i = 0; i < sizeof(kCandidates) / sizeof(kCandidates[0]); ++i)
-    if (TryConvertWithRoundTrip(dest, src, kCandidates[i]))
+    snprintf(temp, sizeof(temp), "WINDOWS-%u", (unsigned)codePage);
+    iconv_t cd = iconv_open("UTF-8", temp);
+    if (cd != (iconv_t)(-1))
+    {
+      iconv_close(cd);
       return true;
-  return false;
+    }
+  }
+  snprintf(temp, sizeof(temp), "CP%u", (unsigned)codePage);
+  iconv_t cd = iconv_open("UTF-8", temp);
+  if (cd != (iconv_t)(-1))
+  {
+    iconv_close(cd);
+    return true;
+  }
+  snprintf(temp, sizeof(temp), "MS%u", (unsigned)codePage);
+  cd = iconv_open("UTF-8", temp);
+  if (cd == (iconv_t)(-1))
+    return false;
+  iconv_close(cd);
+  return true;
 }
-#endif
 
 void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
 {
+  codePage = ResolveArchiveFilenameCodePage(codePage);
   dest.Empty();
   if (src.IsEmpty())
     return;
@@ -449,12 +636,8 @@ void MultiByteToUnicodeString2(UString &dest, const AString &src, UINT codePage)
   if (TryMultiByteToUnicodeStringWithCodePage(dest, src, codePage))
     return;
 
-#ifdef __APPLE__
-  if (TryAutoDetectLegacyEncoding(dest, src))
-    return;
-#endif
-
-  if (codePage == CP_UTF8 || g_ForceToUTF8)
+  if (codePage == CP_UTF8
+      || (g_ForceToUTF8 && (codePage == CP_ACP || codePage == CP_OEMCP)))
   {
 #if 1
     ConvertUTF8ToUnicode(src, dest);
@@ -583,7 +766,8 @@ static void UnicodeStringToMultiByte2_Native(AString &dest, const UString &src)
 static void UnicodeStringToMultiByte2(AString &dest, const UString &src2, UINT codePage, char defaultChar, bool &defaultCharWasUsed)
 {
   // if (codePage == 1234567) // for debug purposes
-  if (codePage == CP_UTF8 || g_ForceToUTF8)
+  if (codePage == CP_UTF8
+      || (g_ForceToUTF8 && (codePage == CP_ACP || codePage == CP_OEMCP)))
   {
 #if 1
     defaultCharWasUsed = false;
@@ -622,6 +806,10 @@ static void UnicodeStringToMultiByte2(AString &dest, const UString &src2, UINT c
   dest.Empty();
   defaultCharWasUsed = false;
   if (src.IsEmpty())
+    return;
+
+  if (codePage != CP_ACP && codePage != CP_OEMCP
+      && TryUnicodeToMultiByteWithCodePage(dest, src, codePage, defaultChar, defaultCharWasUsed))
     return;
 
   const size_t len = wcstombs(NULL, src, 0);

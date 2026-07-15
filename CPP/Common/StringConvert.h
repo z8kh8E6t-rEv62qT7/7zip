@@ -6,6 +6,14 @@
 #include "MyString.h"
 #include "MyWindows.h"
 
+// A non-zero value overrides only CP_ACP / CP_OEMCP byte-to-Unicode decoding
+// on the calling thread. Unicode-to-filesystem conversion and explicit code
+// pages are left untouched. The return value is the previous override and is
+// intended for scoped restoration by archive clients.
+UINT SetThreadArchiveFilenameCodePage(UINT codePage);
+UINT GetThreadArchiveFilenameCodePage();
+bool IsArchiveFilenameCodePageSupported(UINT codePage);
+
 UString MultiByteToUnicodeString(const AString &src, UINT codePage = CP_ACP);
 UString MultiByteToUnicodeString(const char *src, UINT codePage = CP_ACP);
 

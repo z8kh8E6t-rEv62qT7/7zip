@@ -1388,6 +1388,20 @@ HRESULT CArc::PrepareToOpen(const COpenOptions &op, unsigned formatIndex, CMyCom
     */
     RINOK(SetProperties(archive, *op.props))
   }
+
+  if (op.filenameCodePageDefined)
+  {
+    CObjectVector<CProperty> properties;
+    CProperty property;
+    property.Name = L"cp";
+    property.Value.Add_UInt32(op.filenameCodePage);
+    properties.Add(property);
+    const HRESULT setResult = SetProperties(archive, properties);
+    // ZIP and TAR consume the upstream cp property directly. Other handlers
+    // continue under the caller's scoped CP_ACP / CP_OEMCP override.
+    if (setResult != S_OK && setResult != E_INVALIDARG && setResult != E_NOTIMPL && setResult != E_NOINTERFACE)
+      return setResult;
+  }
   
   #endif
   return S_OK;
