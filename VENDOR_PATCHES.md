@@ -102,6 +102,13 @@ Current local content in this tree falls into two groups:
   the existing strict base64 decoder. Reject malformed input, embedded NULs,
   invalid UTF-8, and unknown encodings instead of accepting unsafe path data.
 
+- CPP/7zip/Archive/PeHandler.cpp
+  Preserve every COFF object section's complete SizeOfRawData instead of
+  applying PE image VirtualSize and data-directory truncation rules. Resolve
+  slash-prefixed long section names with bounded reads from the validated COFF
+  string table and reject malformed offsets, overflow, empty names, overlong
+  names, unterminated strings, and truncated tables.
+
 Patch intent
 - Keep the vendored tree close to upstream.
 - Limit local deltas to macOS support and cross-platform correctness required

@@ -417,7 +417,7 @@ struct CSection
         totalSize = t;
   }
   
-  void Parse(const Byte *p);
+  void Parse(const Byte *p, bool coffMode);
 
   int Compare(const CSection &s) const
   {
@@ -435,7 +435,57 @@ static void GetName(const Byte *name, AString &res)
   res.SetFrom_CalcLen((const char *)name, kNameSize);
 }
 
-void CSection::Parse(const Byte *p)
+static int ParseCoffStringOffset(const AString &name, UInt32 &offset)
+{
+  if (name.IsEmpty() || name[0] != '/')
+    return 0;
+  if (name.Len() == 1)
+    return -1;
+
+  UInt32 value = 0;
+  for (unsigned i = 1; i < name.Len(); i++)
+  {
+    const Byte c = (Byte)name[i];
+    if (c < '0' || c > '9')
+      return -1;
+    const UInt32 digit = (UInt32)(c - '0');
+    if (value > (((UInt32)0xFFFFFFFF - digit) / 10))
+      return -1;
+    value = value * 10 + digit;
+  }
+  offset = value;
+  return 1;
+}
+
+static HRESULT ResolveCoffSectionName(IInStream *stream, UInt64 stringTablePos,
+    UInt32 stringTableSize, CSection &section)
+{
+  UInt32 offset;
+  const int offsetResult = ParseCoffStringOffset(section.Name, offset);
+  if (offsetResult == 0)
+    return S_OK;
+  if (offsetResult < 0 || offset < 4 || offset >= stringTableSize)
+    return S_FALSE;
+
+  const UInt32 kNameSizeMax = (UInt32)1 << 12;
+  UInt32 readSize = stringTableSize - offset;
+  if (readSize > kNameSizeMax + 1)
+    readSize = kNameSizeMax + 1;
+  CByteBuffer name(readSize);
+  RINOK(InStream_SeekSet(stream, stringTablePos + offset))
+  RINOK(ReadStream_FALSE(stream, name, readSize))
+
+  UInt32 len = 0;
+  while (len < readSize && name[len] != 0)
+    len++;
+  if (len == 0 || len == readSize || len > kNameSizeMax)
+    return S_FALSE;
+
+  section.Name.SetFrom((const char *)(const Byte *)name, len);
+  return S_OK;
+}
+
+void CSection::Parse(const Byte *p, bool coffMode)
 {
   GetName(p, Name);
   G32( 8, VSize);
@@ -447,7 +497,7 @@ void CSection::Parse(const Byte *p)
   // v24.08: we extract only useful data (without extra padding bytes).
   // VSize == 0 is not expected, but we support that case too.
   // return (VSize && VSize < PSize) ? VSize : PSize;
-  ExtractSize = (VSize && VSize < PSize) ? VSize : PSize;
+  ExtractSize = coffMode ? PSize : ((VSize && VSize < PSize) ? VSize : PSize);
 }
 
 
@@ -2462,16 +2512,16 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *callback)
   for (i = 0; i < _header.NumSections; i++, pos += kSectionSize)
   {
     CSection &sect = _sections.AddNew();
-    sect.Parse(buffer + pos);
+    sect.Parse(buffer + pos, _coffMode);
     sect.IsRealSect = true;
-    if (sect.Name.IsEqualTo(".reloc"))
+    if (!_coffMode && sect.Name.IsEqualTo(".reloc"))
     {
       const CDirLink &dl = _optHeader.DirItems[kDirLink_BASERELOC];
       if (dl.Va == sect.Va &&
           dl.Size <= sect.PSize)
         sect.ExtractSize = dl.Size;
     }
-    else if (sect.Name.IsEqualTo(".pdata"))
+    else if (!_coffMode && sect.Name.IsEqualTo(".pdata"))
     {
       const CDirLink &dl = _optHeader.DirItems[kDirLink_EXCEPTION];
       if (dl.Va == sect.Va &&
@@ -2572,25 +2622,61 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *callback)
   }
   }
 
-  if (_header.NumSymbols > 0 && _header.PointerToSymbolTable >= optStart)
+  bool needCoffStringTable = false;
+  if (_coffMode)
+  {
+    for (i = 0; i < _header.NumSections; i++)
+    {
+      UInt32 offset;
+      const int offsetResult = ParseCoffStringOffset(_sections[i].Name, offset);
+      if (offsetResult < 0)
+        return S_FALSE;
+      if (offsetResult > 0)
+        needCoffStringTable = true;
+    }
+  }
+
+  const bool hasCoffSymbols =
+      _header.NumSymbols > 0 && _header.PointerToSymbolTable >= optStart;
+  if (needCoffStringTable && _header.PointerToSymbolTable < optStart)
+    return S_FALSE;
+
+  if (hasCoffSymbols || needCoffStringTable)
   {
     if (_header.NumSymbols >= (1 << 24))
       return S_FALSE;
-    UInt32 size = _header.NumSymbols * 18;
-    RINOK(InStream_SeekSet(stream, (UInt64)_header.PointerToSymbolTable + size))
+    const UInt32 symbolsSize = _header.NumSymbols * 18;
+    const UInt64 stringTablePos =
+        (UInt64)_header.PointerToSymbolTable + symbolsSize;
+    RINOK(InStream_SeekSet(stream, stringTablePos))
     Byte buf[4];
     RINOK(ReadStream_FALSE(stream, buf, 4))
-    UInt32 size2 = Get32(buf);
-    if (size2 >= (1 << 28))
+    const UInt32 stringTableSize = Get32(buf);
+    if (stringTableSize >= (1 << 28)
+        || (_coffMode && stringTableSize < 4))
       return S_FALSE;
-    size += size2;
 
-    CSection &sect = _sections.AddNew();
-    sect.Name = "COFF_SYMBOLS";
-    sect.Va = 0;
-    sect.Pa = _header.PointerToSymbolTable;
-    sect.Set_Size_for_all(size);
-    sect.UpdateTotalSize(_totalSize);
+    if (needCoffStringTable)
+    {
+      UInt64 fileSize;
+      RINOK(InStream_GetSize_SeekToEnd(stream, fileSize))
+      if (stringTablePos > fileSize || stringTableSize > fileSize - stringTablePos)
+        return S_FALSE;
+      for (i = 0; i < _header.NumSections; i++)
+        RINOK(ResolveCoffSectionName(stream, stringTablePos,
+            stringTableSize, _sections[i]))
+    }
+
+    if (hasCoffSymbols)
+    {
+      const UInt32 size = symbolsSize + stringTableSize;
+      CSection &sect = _sections.AddNew();
+      sect.Name = "COFF_SYMBOLS";
+      sect.Va = 0;
+      sect.Pa = _header.PointerToSymbolTable;
+      sect.Set_Size_for_all(size);
+      sect.UpdateTotalSize(_totalSize);
+    }
   }
 
   {
