@@ -1,4 +1,4 @@
-Vendored upstream: 7-Zip 26.01
+Vendored upstream: 7-Zip 26.02
 Source version markers:
 - C/7zVersion.h
 - DOC/readme.txt
@@ -10,18 +10,18 @@ must stay small, auditable, and documented here.
 Current local content in this tree falls into two groups:
 
 1. Upstream source sync
-- The tree now contains the upstream 7-Zip 26.01 source snapshot.
+- The tree now contains the upstream 7-Zip 26.02 source snapshot.
 - Official language catalogs were added under Lang/ (Lang/en.ttt and
   Lang/*.txt).
 - DOC/unRarLicense.txt is the upstream license text.
 - Asm/arm64/LzmaDecOpt.S and DOC/unRarLicense.txt are synced directly from the
-  same upstream 26.01 snapshot.
+  same upstream 26.02 snapshot.
 
 2. Local patches
 
 - C/Alloc.h
 - C/Alloc.c
-  Keep upstream 26.01 large-page controls based on z7_LargePage_Set() and
+  Keep upstream 26.02 large-page controls based on z7_LargePage_Set() and
   Z7_LARGE_PAGES_FLAG_* while preserving a small macOS-specific mach_vm
   superpage allocation path. On macOS, real superpage allocations are attempted
   only when large-page mode is enabled; failures follow upstream FAIL_STOP
@@ -109,7 +109,7 @@ Patch intent
 - Prefer removing a local patch when upstream gains an equivalent fix.
 
 When refreshing upstream
-- Replace this tree with a clean upstream 7-Zip 26.01-or-newer source
+- Replace this tree with a clean upstream 7-Zip 26.02-or-newer source
   snapshot.
 - Keep official assets such as Lang/* and DOC/unRarLicense.txt in sync with the
   same snapshot.
