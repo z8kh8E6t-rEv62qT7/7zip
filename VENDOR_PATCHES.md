@@ -109,6 +109,27 @@ Current local content in this tree falls into two groups:
   string table and reject malformed offsets, overflow, empty names, overlong
   names, unterminated strings, and truncated tables.
 
+- CPP/7zip/Archive/IhexHandler.cpp
+  Validate the four ASCII zero digits in non-data Intel HEX record addresses as
+  characters. This allows a valid extended-address record to appear among the
+  detector's first records instead of comparing encoded text against NUL.
+
+- CPP/7zip/Archive/LpHandler.cpp
+  Read and validate both Android dynamic-partition geometry copies, then try
+  each metadata slot's primary and backup copy in format order. Failed
+  candidates are cleared before the next attempt, and using a redundant copy
+  is surfaced through the existing header-warning property.
+
+- CPP/7zip/Archive/NtfsHandler.cpp
+  Retain the on-disk data-attribute flags so sparse streams are not mistaken
+  for LZNT1-compressed streams merely because both use a compression-unit
+  field. Sparse extents now zero-fill while initialized physical extents are
+  copied directly.
+
+- CPP/7zip/Archive/CramfsHandler.cpp
+  Honor `CRAMFS_FLAG_HOLES`: a repeated block offset represents one logical
+  zero block and does not enter the zlib/LZMA decoder with an empty input.
+
 Patch intent
 - Keep the vendored tree close to upstream.
 - Limit local deltas to macOS support and cross-platform correctness required

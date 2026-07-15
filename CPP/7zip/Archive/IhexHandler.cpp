@@ -177,10 +177,10 @@ API_FUNC_static_IsArc IsArc_Ihex(const Byte *p, size_t size)
           return k_IsArc_Res_NO;
         return k_IsArc_Res_YES;
       }
-      if (p[2] != 0 ||
-          p[3] != 0 ||
-          p[4] != 0 ||
-          p[5] != 0)
+      if (p[2] != '0' ||
+          p[3] != '0' ||
+          p[4] != '0' ||
+          p[5] != '0')
         return k_IsArc_Res_NO;
       if (type == kType_Seg || type == kType_High)
       {

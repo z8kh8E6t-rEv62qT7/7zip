@@ -37,6 +37,7 @@ static const unsigned kHeaderNameSize = 16;
 static const UInt32 kNodeSize = 12;
 
 static const UInt32 kFlag_FsVer2 = (1 << 0);
+static const UInt32 kFlag_Holes = (1 << 8);
 
 static const unsigned k_Flags_BlockSize_Shift = 11;
 static const unsigned k_Flags_BlockSize_Mask = 7;
@@ -164,6 +165,7 @@ struct CHeader
   }
 
   bool IsVer2() const { return (Flags & kFlag_FsVer2) != 0; }
+  bool HasHoles() const { return (Flags & kFlag_Holes) != 0; }
   unsigned GetBlockSizeShift() const { return (unsigned)(Flags >> k_Flags_BlockSize_Shift) & k_Flags_BlockSize_Mask; }
   unsigned GetMethod() const { return (unsigned)(Flags >> k_Flags_Method_Shift) & k_Flags_Method_Mask; }
 };
@@ -587,6 +589,12 @@ HRESULT CHandler::ReadBlock(UInt64 blockIndex, Byte *dest, size_t blockSize)
   if (end < start || end > _size)
     return S_FALSE;
   const UInt32 inSize = end - start;
+
+  if (inSize == 0 && _h.HasHoles())
+  {
+    memset(dest, 0, blockSize);
+    return S_OK;
+  }
 
   if (_method == k_Flags_Method_LZMA)
   {

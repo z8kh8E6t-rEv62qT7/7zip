@@ -403,9 +403,12 @@ bool CVolInfo::Parse(const Byte *p, unsigned size)
 
 struct CAttr
 {
+  static const UInt16 kFlag_Compressed = 1;
+
   UInt32 Type;
 
   Byte NonResident;
+  UInt16 Flags;
 
   // Non-Resident
   Byte CompressionUnit;
@@ -428,6 +431,7 @@ struct CAttr
   // UInt16 ResidentFlags;
 
   bool IsCompressionUnitSupported() const { return CompressionUnit == 0 || CompressionUnit == 4; }
+  bool IsCompressed() const { return (Flags & kFlag_Compressed) != 0; }
 
   UInt32 Parse(const Byte *p, unsigned size);
   bool ParseFileName(CFileNameAttr &a) const { return a.Parse(Data, (unsigned)Data.Size()); }
@@ -498,7 +502,7 @@ UInt32 CAttr::Parse(const Byte *p, unsigned size)
     }
   }
 
-  // G16(p + 0x0C, Flags);
+  G16(p + 0x0C, Flags);
   // G16(p + 0x0E, Instance);
   // PRF(printf(" F=%4X", Flags));
   // PRF(printf(" Inst=%d", Instance));
@@ -667,6 +671,7 @@ Z7_CLASS_IMP_IInStream(
   UInt64 _physPos;
   UInt64 _curRem;
   bool _sparseMode;
+  bool _compressed;
 public:
   bool InUse;
 private:
@@ -686,11 +691,12 @@ private:
   HRESULT SeekToPhys() { return InStream_SeekSet(Stream, _physPos); }
   UInt32 GetCuSize() const { return (UInt32)1 << (BlockSizeLog + CompressionUnit); }
 public:
-  HRESULT InitAndSeek(unsigned compressionUnit)
+  HRESULT InitAndSeek(unsigned compressionUnit, bool compressed)
   {
     CompressionUnit = compressionUnit;
+    _compressed = compressed;
     _chunkSizeLog = BlockSizeLog + CompressionUnit;
-    if (compressionUnit != 0)
+    if (compressionUnit != 0 && _compressed)
     {
       UInt32 cuSize = GetCuSize();
       _inBuf.Alloc(cuSize);
@@ -861,7 +867,7 @@ Z7_COM7F_IMF(CInStream::Read(void *data, UInt32 size, UInt32 *processedSize))
     
     bool isCompressed = false;
     const UInt64 virtBlock2End = virtBlock2 + comprUnitSize;
-    if (CompressionUnit != 0)
+    if (_compressed && CompressionUnit != 0)
       for (unsigned i = left; i < Extents.Size(); i++)
       {
         const CExtent &e = Extents[i];
@@ -881,6 +887,15 @@ Z7_COM7F_IMF(CInStream::Read(void *data, UInt32 size, UInt32 *processedSize))
     if (!isCompressed)
     {
       const CExtent &e = Extents[i];
+      if (e.IsEmpty())
+      {
+        UInt64 next = Extents[i + 1].Virt << BlockSizeLog;
+        if (next > Size)
+          next = Size;
+        _curRem = next - _virtPos;
+        _sparseMode = true;
+        break;
+      }
       UInt64 newPos = (e.Phy << BlockSizeLog) + _virtPos - (e.Virt << BlockSizeLog);
       if (newPos != _physPos)
       {
@@ -1230,7 +1245,7 @@ HRESULT CMftRec::GetStream(IInStream *mainStream, int dataIndex,
       ss->Stream = mainStream;
       ss->BlockSizeLog = clusterSizeLog;
       ss->InUse = InUse();
-      RINOK(ss->InitAndSeek(attr0.CompressionUnit))
+      RINOK(ss->InitAndSeek(attr0.CompressionUnit, attr0.IsCompressed()))
       *destStream = streamTemp2.Detach();
       return S_OK;
     }

@@ -506,6 +506,8 @@ Z7_CLASS_IMP_CHandler_IInArchive_1(
   AString DevicesString;
   AString DeviceArcName;
 
+  void ClearMetadata();
+  HRESULT ParseMetadata(IInStream *stream, UInt64 offset);
   HRESULT Open2(IInStream *stream);
 };
 
@@ -528,43 +530,27 @@ static bool IsBufZero(const Byte *data, size_t size)
 }
 
 
-HRESULT CHandler::Open2(IInStream *stream)
+void CHandler::ClearMetadata()
 {
-  RINOK(InStream_SeekSet(stream, LP_PARTITION_RESERVED_BYTES))
-  {
-    MY_ALIGN (4)
-    Byte buf[k_Geometry_Size];
-    RINOK(ReadStream_FALSE(stream, buf, k_Geometry_Size))
-    if (memcmp(buf, k_Signature, k_SignatureSize) != 0)
-      return S_FALSE;
-    if (!geom.Parse(buf))
-      return S_FALSE;
-    if (!CheckSha256_csOffset(buf, k_Geometry_Size, 8))
-      return S_FALSE;
-  }
+  _totalSize = 0;
+  _items.Clear();
+  Extents.Clear();
+  _mainFileIndex = -1;
+  Major_version = 0;
+  Minor_version = 0;
+  Flags = 0;
+  MethodsMask = 0;
+  GroupsString.Empty();
+  DevicesString.Empty();
+  DeviceArcName.Empty();
+}
 
+HRESULT CHandler::ParseMetadata(IInStream *stream, UInt64 offset)
+{
+  ClearMetadata();
+  RINOK(InStream_SeekSet(stream, offset))
   CByteBuffer buffer;
-  RINOK(InStream_SeekToBegin(stream))
   buffer.Alloc(LP_METADATA_GEOMETRY_SIZE * 2);
-  {
-    // buffer.Size() >= LP_PARTITION_RESERVED_BYTES
-    RINOK(ReadStream_FALSE(stream, buffer, LP_PARTITION_RESERVED_BYTES))
-    if (!IsBufZero(buffer, LP_PARTITION_RESERVED_BYTES))
-    {
-      _headerWarning = true;
-      // return S_FALSE;
-    }
-  }
-
-  RINOK(ReadStream_FALSE(stream, buffer, LP_METADATA_GEOMETRY_SIZE * 2))
-  // we check that 2 copies of GEOMETRY are identical:
-  if (memcmp(buffer, buffer + LP_METADATA_GEOMETRY_SIZE, LP_METADATA_GEOMETRY_SIZE) != 0
-      || !IsBufZero(buffer + k_Geometry_Size, LP_METADATA_GEOMETRY_SIZE - k_Geometry_Size))
-  {
-    _headerWarning = true;
-    // return S_FALSE;
-  }
-
   RINOK(ReadStream_FALSE(stream, buffer, k_LpMetadataHeader10_size))
   LpMetadataHeader header;
   header.Parse128(buffer);
@@ -731,6 +717,90 @@ HRESULT CHandler::Open2(IInStream *stream)
   return S_OK;
 }
 
+static HRESULT ReadGeometry(IInStream *stream, UInt64 offset, Byte *buffer,
+    CGeometry &geometry, bool &isValid)
+{
+  isValid = false;
+  RINOK(InStream_SeekSet(stream, offset))
+  const HRESULT res = ReadStream_FALSE(stream, buffer, LP_METADATA_GEOMETRY_SIZE);
+  if (res != S_OK)
+    return res;
+  if (memcmp(buffer, k_Signature, k_SignatureSize) != 0
+      || !geometry.Parse(buffer)
+      || !CheckSha256_csOffset(buffer, k_Geometry_Size, 8))
+    return S_OK;
+  isValid = true;
+  return S_OK;
+}
+
+HRESULT CHandler::Open2(IInStream *stream)
+{
+  MY_ALIGN (4)
+  Byte reserved[LP_PARTITION_RESERVED_BYTES];
+  RINOK(InStream_SeekToBegin(stream))
+  RINOK(ReadStream_FALSE(stream, reserved, sizeof(reserved)))
+  if (!IsBufZero(reserved, sizeof(reserved)))
+    _headerWarning = true;
+
+  MY_ALIGN (4)
+  Byte primaryBuf[LP_METADATA_GEOMETRY_SIZE];
+  MY_ALIGN (4)
+  Byte backupBuf[LP_METADATA_GEOMETRY_SIZE];
+  CGeometry primaryGeom;
+  CGeometry backupGeom;
+  bool primaryValid;
+  bool backupValid;
+  const HRESULT primaryRes = ReadGeometry(stream, LP_PARTITION_RESERVED_BYTES,
+      primaryBuf, primaryGeom, primaryValid);
+  if (primaryRes != S_OK && primaryRes != S_FALSE)
+    return primaryRes;
+  const HRESULT backupRes = ReadGeometry(stream,
+      LP_PARTITION_RESERVED_BYTES + LP_METADATA_GEOMETRY_SIZE,
+      backupBuf, backupGeom, backupValid);
+  if (backupRes != S_OK && backupRes != S_FALSE)
+    return backupRes;
+  if (!primaryValid && !backupValid)
+    return S_FALSE;
+
+  if (!primaryValid || !backupValid)
+    _headerWarning = true;
+  if (primaryRes == S_OK && backupRes == S_OK)
+  {
+    if (memcmp(primaryBuf, backupBuf, LP_METADATA_GEOMETRY_SIZE) != 0
+        || !IsBufZero(primaryBuf + k_Geometry_Size, LP_METADATA_GEOMETRY_SIZE - k_Geometry_Size)
+        || !IsBufZero(backupBuf + k_Geometry_Size, LP_METADATA_GEOMETRY_SIZE - k_Geometry_Size))
+      _headerWarning = true;
+  }
+  geom = primaryValid ? primaryGeom : backupGeom;
+
+  const UInt64 metadataBase = LP_PARTITION_RESERVED_BYTES + LP_METADATA_GEOMETRY_SIZE * 2;
+  const UInt64 backupBase = metadataBase
+      + (UInt64)geom.metadata_max_size * geom.metadata_slot_count;
+  for (UInt32 slot = 0; slot < geom.metadata_slot_count; slot++)
+  {
+    const UInt64 slotOffset = (UInt64)geom.metadata_max_size * slot;
+    const UInt64 offsets[2] = { metadataBase + slotOffset, backupBase + slotOffset };
+    for (unsigned copy = 0; copy < 2; copy++)
+    {
+      const HRESULT res = ParseMetadata(stream, offsets[copy]);
+      if (res == S_OK)
+      {
+        if (slot != 0 || copy != 0)
+          _headerWarning = true;
+        return S_OK;
+      }
+      if (res != S_FALSE)
+      {
+        ClearMetadata();
+        return res;
+      }
+    }
+  }
+
+  ClearMetadata();
+  return S_FALSE;
+}
+
 
 Z7_COM7F_IMF(CHandler::Open(IInStream *stream,
     const UInt64 * /* maxCheckStartPosition */,
@@ -776,18 +846,11 @@ Z7_COM7F_IMF(CHandler::Open(IInStream *stream,
 
 Z7_COM7F_IMF(CHandler::Close())
 {
-  _totalSize = 0;
+  ClearMetadata();
   // _usedSize = 0;
   // _headersSize = 0;
-  _items.Clear();
-  Extents.Clear();
   _stream.Release();
-  _mainFileIndex = -1;
   _headerWarning = false;
-  MethodsMask = 0;
-  GroupsString.Empty();
-  DevicesString.Empty();
-  DeviceArcName.Empty();
   return S_OK;
 }
 
