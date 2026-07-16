@@ -627,6 +627,8 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *openCallback)
             _unsupported = true;
             return S_FALSE;
           }
+          // bit 0 is a flag, not part of the host cluster offset
+          offset &= ~(UInt64)1;
         }
       }
       

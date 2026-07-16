@@ -2514,20 +2514,6 @@ HRESULT CHandler::Open2(IInStream *stream, IArchiveOpenCallback *callback)
     CSection &sect = _sections.AddNew();
     sect.Parse(buffer + pos, _coffMode);
     sect.IsRealSect = true;
-    if (!_coffMode && sect.Name.IsEqualTo(".reloc"))
-    {
-      const CDirLink &dl = _optHeader.DirItems[kDirLink_BASERELOC];
-      if (dl.Va == sect.Va &&
-          dl.Size <= sect.PSize)
-        sect.ExtractSize = dl.Size;
-    }
-    else if (!_coffMode && sect.Name.IsEqualTo(".pdata"))
-    {
-      const CDirLink &dl = _optHeader.DirItems[kDirLink_EXCEPTION];
-      if (dl.Va == sect.Va &&
-          dl.Size <= sect.PSize)
-        sect.ExtractSize = dl.Size;
-    }
     
     /* PE pre-file in .hxs file has errors:
          PSize of resource is larger than real size.

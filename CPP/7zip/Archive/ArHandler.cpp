@@ -369,6 +369,18 @@ HRESULT CHandler::ParseLongNames(IInStream *stream)
   return S_OK;
 }
 
+static void NormalizeMemberNames(CObjectVector<CItem> &items)
+{
+  for (unsigned i = 0; i < items.Size(); i++)
+  {
+    AString &name = items[i].Name;
+    // GNU and Microsoft ar use one trailing slash as a short-name
+    // terminator. Preserve the two special table names, "/" and "//".
+    if (name.Len() > 1 && name.Back() == '/' && !name.IsEqualTo("//"))
+      name.DeleteBack();
+  }
+}
+
 void CHandler::ChangeDuplicateNames()
 {
   unsigned i;
@@ -433,8 +445,6 @@ HRESULT CHandler::AddFunc(UInt32 offset, const Byte *data, size_t size, size_t &
   AString &s = _libFiles[_numLibFiles];
   const AString &name = _items[(unsigned)fileIndex].Name;
   s += name;
-  if (!name.IsEmpty() && name.Back() == '/')
-    s.DeleteBack();
   s += "    ";
   s += (const char *)(data + pos);
   // s.Add_Char((char)0xD);
@@ -604,6 +614,7 @@ Z7_COM7F_IMF(CHandler::Open(IInStream *stream,
       UpdateErrorMessage("Long file names parsing error");
     if (_longNames_FileIndex >= 0)
       _items.Delete((unsigned)_longNames_FileIndex);
+    NormalizeMemberNames(_items);
 
     if (!_items.IsEmpty() && _items[0].Name.IsEqualTo("debian-binary"))
     {
@@ -715,7 +726,7 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 index, PROPID propID, PROPVARIANT *val
       if (item.TextFileIndex >= 0)
         prop = (item.TextFileIndex == 0) ? "1.txt" : "2.txt";
       else
-        prop = (const wchar_t *)NItemName::GetOsPath_Remove_TailSlash(MultiByteToUnicodeString(item.Name, CP_OEMCP));
+        prop = (const wchar_t *)NItemName::GetOsPath(MultiByteToUnicodeString(item.Name, CP_OEMCP));
       break;
     case kpidSize:
     case kpidPackSize:

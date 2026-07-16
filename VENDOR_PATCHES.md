@@ -109,6 +109,17 @@ Current local content in this tree falls into two groups:
   string table and reject malformed offsets, overflow, empty names, overlong
   names, unterminated strings, and truncated tables.
 
+  Preserve a PE image section's complete logical contents when `.reloc` or
+  `.pdata` contains data beyond the corresponding loader data directory. The
+  directory describes its table, not the complete section, and must not replace
+  the section's extraction size.
+
+- CPP/7zip/Archive/ArHandler.cpp
+  Normalize the GNU and Microsoft trailing-slash member-name terminator after
+  long-name resolution while preserving the `/` and `//` table members. Debian
+  packages emitted with GNU short names are then classified consistently, and
+  duplicate and symbol handling use the same canonical member names.
+
 - CPP/7zip/Archive/IhexHandler.cpp
   Validate the four ASCII zero digits in non-data Intel HEX record addresses as
   characters. This allows a valid extended-address record to appear among the
@@ -129,6 +140,11 @@ Current local content in this tree falls into two groups:
 - CPP/7zip/Archive/CramfsHandler.cpp
   Honor `CRAMFS_FLAG_HOLES`: a repeated block offset represents one logical
   zero block and does not enter the zlib/LZMA decoder with an empty input.
+
+- CPP/7zip/Archive/QcowHandler.cpp
+  Clear the QCOW2 v3 explicit-zero-cluster flag before calculating the physical
+  end of an allocated zero cluster. The flag is not part of the host offset;
+  counting it as one byte made valid images appear truncated.
 
 Patch intent
 - Keep the vendored tree close to upstream.
